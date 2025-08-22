@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from rich.console import Console
 
@@ -62,7 +62,18 @@ def transcribe_with_whisper(audio_path: Path, whisper_model: str = "base", langu
     return result.get("text", "").strip()
 
 
-def summarize_text(text: str, paragraphs: int, model: str) -> str:
+def _trim_to_char_limit(s: str, limit: int) -> str:
+    if len(s) <= limit:
+        return s
+    # try not to cut off mid-word
+    trimmed = s[:limit].rstrip()
+    last_space = trimmed.rfind(" ")
+    if last_space > limit * 0.6:  # only backtrack if it keeps majority
+        trimmed = trimmed[:last_space]
+    return trimmed.rstrip(". ") + "..."
+
+
+def summarize_text(text: str, model: str, paragraphs: Optional[int] = None, char_limit: Optional[int] = None) -> str:
     if not os.getenv("OPENAI_API_KEY"):
         fail(
             "OPENAI_API_KEY not set in environment. Set it and re-run.\n"
@@ -77,42 +88,95 @@ def summarize_text(text: str, paragraphs: int, model: str) -> str:
 
     client = OpenAI()
 
-    instruction = (
-        "You are an expert summarizer. Return exactly {n} paragraphs,"
-        " separated by a single blank line, no headings or bullet points."
-    ).format(n=paragraphs)
+    if paragraphs is None and char_limit is None:
+        fail("Internal error: either paragraphs or char_limit must be provided")
+
+    if paragraphs is not None:
+        instruction = (
+            "You are an expert summarizer. Return exactly {n} paragraphs, separated by a single blank line, "
+            "no headings, no title, no bullet points."
+        ).format(n=paragraphs)
+    else:
+        instruction = (
+            "You are an expert summarizer. Produce a concise summary no longer than {c} characters. "
+            "Avoid pre/postamble, no headings or bullet points. If truncation would harm clarity, prioritize clarity "
+            "while staying under the limit."
+        ).format(c=char_limit)
 
     # Simple chunking to avoid overly long prompts
     MAX_CHARS = 8000
     chunks = [text] if len(text) <= MAX_CHARS else [text[i:i+MAX_CHARS] for i in range(0, len(text), MAX_CHARS)]
 
     def summarize_chunk(t: str) -> str:
+        if paragraphs is not None:
+            user_prompt = f"Summarize this transcript chunk into at most {paragraphs} paragraphs (will refine later):\n\n{t}"
+        else:
+            user_prompt = f"Summarize this transcript chunk within {char_limit} characters (will refine later):\n\n{t}"
         resp = client.chat.completions.create(
             model=model,
             temperature=0.3,
             messages=[
                 {"role": "system", "content": instruction},
-                {"role": "user", "content": f"Summarize this transcript chunk:\n\n{t}"},
+                {"role": "user", "content": user_prompt},
             ],
         )
         return resp.choices[0].message.content.strip()
 
     if len(chunks) == 1:
-        return summarize_chunk(chunks[0])
+        summary = summarize_chunk(chunks[0])
+        if char_limit is not None:
+            summary = _trim_to_char_limit(summary, char_limit)
+        return summary
 
     # Summarize each chunk first
     partials = [summarize_chunk(c) for c in chunks]
     # Then summarize the partial summaries down to exactly N paragraphs
     combined = "\n\n".join(partials)
+    if paragraphs is not None:
+        refine_prompt = f"Combine and refine into exactly {paragraphs} paragraphs:\n\n{combined}"
+    else:
+        refine_prompt = f"Combine and refine into a summary within {char_limit} characters (shorter is fine if clear):\n\n{combined}"
     resp = client.chat.completions.create(
         model=model,
         temperature=0.3,
         messages=[
             {"role": "system", "content": instruction},
-            {"role": "user", "content": f"Combine and refine into exactly {paragraphs} paragraphs:\n\n{combined}"},
+            {"role": "user", "content": refine_prompt},
         ],
     )
-    return resp.choices[0].message.content.strip()
+    final = resp.choices[0].message.content.strip()
+    if char_limit is not None:
+        final = _trim_to_char_limit(final, char_limit)
+    return final
+
+
+def parse_limit(limit_value: str) -> Tuple[Optional[int], Optional[int]]:
+    """Parse the --limit value.
+
+    Returns (paragraphs, char_limit).
+    Examples:
+        1000  -> (None, 1000)
+        2p    -> (2, None)
+        002p  -> (2, None)
+    """
+    lv = limit_value.strip().lower()
+    if not lv:
+        fail("--limit value cannot be empty")
+    if lv.endswith("p"):
+        num = lv[:-1]
+        if not num.isdigit():
+            fail("Invalid paragraph limit format. Use e.g. --limit 3p")
+        p = int(num)
+        if p <= 0:
+            fail("Paragraph limit must be positive")
+        return p, None
+    # character limit
+    if not lv.isdigit():
+        fail("Invalid character limit format. Use integer number of characters or Np for paragraphs")
+    chars = int(lv)
+    if chars <= 0:
+        fail("Character limit must be positive")
+    return None, chars
 
 
 def main(argv: Optional[List[str]] = None) -> None:
@@ -121,11 +185,12 @@ def main(argv: Optional[List[str]] = None) -> None:
         description="Transcribe a video with local Whisper and summarize it with OpenAI."
     )
     parser.add_argument("video", help="Path to input video file (e.g., .mp4)")
-    parser.add_argument("paragraphs", type=int, help="Number of paragraphs in the summary output")
+    parser.add_argument("paragraphs", type=int, nargs="?", help="Number of paragraphs in the summary output (ignored if --limit provided)")
     parser.add_argument("--whisper-model", default="base", help="Whisper model size: tiny, base, small, medium, large")
     parser.add_argument("--language", default="auto", help="Force language code or 'auto' to detect")
     parser.add_argument("--openai-model", default="gpt-4o-mini", help="OpenAI model for summarization")
     parser.add_argument("--out", help="Optional path to write the summary instead of printing")
+    parser.add_argument("--limit", help="Summary limit: <N> characters (e.g. 800) or <N>p paragraphs (e.g. 3p). If omitted, uses positional paragraphs or defaults to 3 paragraphs.")
 
     args = parser.parse_args(argv)
 
@@ -133,8 +198,27 @@ def main(argv: Optional[List[str]] = None) -> None:
     video_path = Path(args.video)
     if not video_path.exists():
         fail(f"Video not found: {video_path}")
-    if args.paragraphs <= 0:
-        fail("paragraphs must be a positive integer")
+    paragraphs_arg: Optional[int] = args.paragraphs
+
+    limit_paragraphs: Optional[int] = None
+    char_limit: Optional[int] = None
+    if args.limit:
+        limit_paragraphs, char_limit = parse_limit(args.limit)
+
+    if limit_paragraphs is not None:
+        effective_paragraphs = limit_paragraphs
+    else:
+        # If char limit used, paragraphs ignored
+        if char_limit is not None:
+            effective_paragraphs = None
+        else:
+            # Default paragraphs if neither provided
+            if paragraphs_arg is None:
+                effective_paragraphs = 3
+            else:
+                if paragraphs_arg <= 0:
+                    fail("paragraphs must be a positive integer")
+                effective_paragraphs = paragraphs_arg
 
     console.rule("[bold]Validating environment")
     ensure_ffmpeg()
@@ -151,14 +235,26 @@ def main(argv: Optional[List[str]] = None) -> None:
             pass
 
     console.rule("[bold]Summarization")
-    summary = summarize_text(transcript, args.paragraphs, model=args.openai_model)
+    summary = summarize_text(
+        transcript,
+        model=args.openai_model,
+        paragraphs=effective_paragraphs,
+        char_limit=char_limit,
+    )
 
     if args.out:
         out_path = Path(args.out)
-        out_path.write_text(summary, encoding="utf-8")
-        console.print(f"[green]Summary written to {out_path}")
     else:
+        # Default output file next to video: <stem>.summary.txt
+        out_path = video_path.parent / f"{video_path.stem}.summary.txt"
+    out_path.write_text(summary, encoding="utf-8")
+    console.print(f"[green]Summary written to {out_path}")
+    
+    # Also display in terminal if short enough
+    if len(summary) <= 1000:
+        console.rule("[bold]Summary")
         console.print(summary)
+        console.rule()
 
 
 if __name__ == "__main__":

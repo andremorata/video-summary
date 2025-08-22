@@ -18,26 +18,85 @@ Prerequisites
 Install (dev)
 ```bash
 python -m venv .venv
-. .venv/bin/activate  # On Windows: .venv\\Scripts\\activate
+# On Windows (Git Bash): source .venv/Scripts/activate
+# On Windows (PowerShell): .venv\Scripts\Activate.ps1
+# On Linux/macOS: source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
-Usage
+Quick Start Scripts
+For convenience, use the provided activation and run scripts:
 ```bash
-video-summary path/to/video.mp4 3 \
+# Activate environment (Windows)
+./activate.bat
+
+# Or run directly with environment activated
+./run.sh path/to/video.mp4 --limit 3p    # Git Bash
+run.bat path/to/video.mp4 --limit 3p     # Command Prompt/PowerShell
+```
+
+Usage
+**Important**: Always activate the virtual environment first!
+```bash
+# Activate environment
+source .venv/Scripts/activate  # Git Bash
+# OR: .venv\Scripts\Activate.ps1  # PowerShell
+# OR: .venv\Scripts\activate.bat  # Command Prompt
+
+# Then run the tool
+python -m video_summary.cli path/to/video.mp4 3 \
   --whisper-model base \
   --openai-model gpt-4o-mini \
   --language auto \
   --out summary.txt
 ```
 - The second positional argument (3) is the number of paragraphs to output.
-- If `--out` is omitted, the summary is printed to stdout.
+ - If `--out` is omitted, the summary is written to `<video_stem>.summary.txt`.
+
+New (defaults & limits)
+- All optional flags now have sensible defaults: `--whisper-model base`, `--openai-model gpt-4o-mini`, `--language auto`.
+- If you omit the positional paragraphs count AND `--limit`, it defaults to 3 paragraphs.
+- If you omit `--out`, the summary is written to `<video_stem>.summary.txt` alongside the video.
+- Summaries ≤ 1000 characters are also displayed in the terminal for quick viewing.
+- Use `--limit` to control output size instead of the positional paragraphs:
+  - `--limit 1000` -> summarize to <= 1000 characters.
+  - `--limit 2p` -> summarize to exactly (refined to) ~2 paragraphs.
+  - If `--limit` is provided with a character count, the paragraphs positional argument is ignored.
+  - Paragraph granularity takes precedence if you provide a `Np` form (e.g., `3p`).
+
+Examples
+```bash
+# Activate environment first
+source .venv/Scripts/activate
+
+# Default 3 paragraphs (no positional paragraphs given)
+python -m video_summary.cli path/to/video.mp4
+
+# Explicit paragraphs
+python -m video_summary.cli path/to/video.mp4 5
+
+# Character limit (<= 1200 chars)
+python -m video_summary.cli path/to/video.mp4 --limit 1200
+
+# Two paragraphs via --limit
+python -m video_summary.cli path/to/video.mp4 --limit 2p
+
+# Custom models & auto output filename
+python -m video_summary.cli path/to/video.mp4 4 --whisper-model small --openai-model gpt-4o-mini
+```
 
 Environment
 - Set your OpenAI API key before running:
-  - PowerShell: `$env:OPENAI_API_KEY = "..."`
-  - bash: `export OPENAI_API_KEY=...`
+  - PowerShell: `$env:OPENAI_API_KEY = "your_key_here"`
+  - Git Bash: `export OPENAI_API_KEY="your_key_here"`
+  - Command Prompt: `set OPENAI_API_KEY=your_key_here`
+
+Troubleshooting
+- **ModuleNotFoundError**: Make sure to activate the virtual environment first with `source .venv/Scripts/activate`
+- **OPENAI_API_KEY not set**: Set your API key in the environment before running
+- **ffmpeg not found**: Install ffmpeg and ensure it's in your PATH
+- **FP16 warning**: Normal when running on CPU, can be ignored
 
 Build a standalone Windows exe
 ```bash
@@ -54,4 +113,10 @@ Note: First-time Whisper model download happens at runtime and is cached (e.g., 
 Repository
 - Public: https://github.com/andremorata/video-summary
 - License: Apache-2.0
+
+Helper Scripts
+The repository includes convenience scripts:
+- `activate.bat` - Activates the virtual environment (Windows)
+- `run.bat` - Runs the tool with environment activated (Windows Command Prompt)
+- `run.sh` - Runs the tool with environment activated (Git Bash)
 
