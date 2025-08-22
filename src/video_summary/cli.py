@@ -59,7 +59,10 @@ def transcribe_with_whisper(audio_path: Path, whisper_model: str = "base", langu
     import whisper
     model = whisper.load_model(whisper_model)
     result = model.transcribe(str(audio_path), language=None if language in (None, "auto") else language)
-    return result.get("text", "").strip()
+    text = result.get("text", "")
+    if isinstance(text, list):
+        text = " ".join(str(item) for item in text)
+    return str(text).strip()
 
 
 def _trim_to_char_limit(s: str, limit: int) -> str:
@@ -120,7 +123,8 @@ def summarize_text(text: str, model: str, paragraphs: Optional[int] = None, char
                 {"role": "user", "content": user_prompt},
             ],
         )
-        return resp.choices[0].message.content.strip()
+        content = getattr(resp.choices[0].message, "content", None) or ""
+        return content.strip()
 
     if len(chunks) == 1:
         summary = summarize_chunk(chunks[0])
@@ -135,7 +139,8 @@ def summarize_text(text: str, model: str, paragraphs: Optional[int] = None, char
     if paragraphs is not None:
         refine_prompt = f"Combine and refine into exactly {paragraphs} paragraphs:\n\n{combined}"
     else:
-        refine_prompt = f"Combine and refine into a summary within {char_limit} characters (shorter is fine if clear):\n\n{combined}"
+        refine_prompt = f"Combine and refine within {char_limit} characters:\n\n{combined}"
+    
     resp = client.chat.completions.create(
         model=model,
         temperature=0.3,
@@ -144,7 +149,8 @@ def summarize_text(text: str, model: str, paragraphs: Optional[int] = None, char
             {"role": "user", "content": refine_prompt},
         ],
     )
-    final = resp.choices[0].message.content.strip()
+    final_content = getattr(resp.choices[0].message, "content", None) or ""
+    final = final_content.strip()
     if char_limit is not None:
         final = _trim_to_char_limit(final, char_limit)
     return final
